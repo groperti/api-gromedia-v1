@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  api-cdn-v1:
+    build: .
+    container_name: api-cdn-v1
+    restart: unless-stopped
+    ports:
+      - '4881:4881'
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production

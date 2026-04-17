@@ -11,7 +11,7 @@ async function bootstrap() {
       'http://localhost:3001',
       'http://localhost:3002',
       'http://localhost:3003',
-      'http://localhost:9020',
+      'http://localhost:3004',
       'http://localhost:9010',
       'http://localhost:9030',
       'http://localhost:9040',

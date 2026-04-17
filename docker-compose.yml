@@ -3,7 +3,7 @@ version: "3.8"
 services:
   cdn:
     build: .
-    container_name: api-gromedia-v1
+    container_name: apiv2-media-v1
     restart: unless-stopped
     ports:
       - "4881:4881"

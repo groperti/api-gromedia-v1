@@ -1,6 +1,7 @@
 export default () => ({
   port: parseInt(process.env.PORT, 10) || 4881,
   cdnApiKey: process.env.CDN_API_KEY || '',
+  mediaPublicApiKey: process.env.MEDIA_PUBLIC_API_KEY || '',
   jwtSecret: process.env.JWT_SECRET || '',
   cdnBaseUrl: process.env.CDN_BASE_URL || 'https://groperti.sin1.contabostorage.com',
   mongo: {

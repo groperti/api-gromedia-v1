@@ -16,6 +16,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
 import { ApiKeyGuard } from '../common/guards/api-key.guard';
 import { JwtUserGuard } from '../common/guards/jwt-user.guard';
+import { PublicApiKeyGuard } from '../common/guards/public-api-key.guard';
 import { MediaService } from './media.service';
 import { UploadMediaDto } from './dto/upload-media.dto';
 import { UpdateMediaDto } from './dto/update-media.dto';
@@ -42,6 +43,42 @@ export class MediaController {
       message: 'Uploaded successfully',
       data: record,
     };
+  }
+
+  @Post('upload-jpg')
+  @UseGuards(ApiKeyGuard)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 20 * 1024 * 1024 },
+    }),
+  )
+  async uploadJpg(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: UploadMediaDto,
+  ) {
+    const record = await this.mediaService.uploadJpg(file, dto);
+    return {
+      error: null,
+      message: 'Uploaded successfully',
+      data: record,
+    };
+  }
+
+  @Get('library/public')
+  @UseGuards(PublicApiKeyGuard)
+  async getPublicLibrary(
+    @Query('page') page = '1',
+    @Query('limit') limit = '20',
+    @Query('type') type?: string,
+    @Query('userId') userId?: string,
+  ) {
+    const result = await this.mediaService.getPublicLibrary(
+      Math.max(1, parseInt(page, 10) || 1),
+      Math.min(100, parseInt(limit, 10) || 20),
+      type,
+      userId,
+    );
+    return { error: null, ...result };
   }
 
   @Get('library')

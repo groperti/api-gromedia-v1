@@ -302,9 +302,7 @@ export class MediaService implements OnModuleInit {
         imgBuf = await (sharp as any)(imgBuf, { failOnError: false }).png().toBuffer();
       }
 
-      imgBuf = await this.autoCropEdges(imgBuf);
       imgBuf = await (sharp as any)(imgBuf).resize({ width: this.maxWidth, withoutEnlargement: true }).toBuffer();
-      imgBuf = await (sharp as any)(imgBuf).trim({ threshold: 12 }).toBuffer();
 
       if (dto.watermark) {
         imgBuf = await this.applyWatermark(imgBuf);
@@ -415,6 +413,83 @@ export class MediaService implements OnModuleInit {
     }
 
     throw new BadRequestException('Unsupported file type. Only images, videos, and documents are allowed.');
+  }
+
+  async uploadJpg(
+    file: Express.Multer.File,
+    dto: UploadMediaDto,
+  ): Promise<MediaFileDocument> {
+    const mime = file.mimetype || '';
+    const originalName = (file.originalname || '').toLowerCase();
+
+    if (!isImage(mime, originalName)) {
+      throw new BadRequestException('Only image files are supported for JPG upload');
+    }
+
+    if (file.size > 20 * 1024 * 1024) {
+      throw new BadRequestException('Image max size is 20MB');
+    }
+
+    const derivedTitle = (dto.title ?? '').trim() || file.originalname.replace(/\.[^.]+$/, '').trim();
+    const baseName = derivedTitle
+      ? `${slugify(derivedTitle)}-${shortId()}`
+      : uuidv4();
+    const appliedTitle = derivedTitle || undefined;
+
+    let imgBuf: Buffer = file.buffer;
+
+    try {
+      await (sharp as any)(imgBuf).metadata();
+    } catch {
+      imgBuf = await (sharp as any)(imgBuf, { failOnError: false }).png().toBuffer();
+    }
+
+    imgBuf = await (sharp as any)(imgBuf)
+      .resize({ width: this.maxWidth, withoutEnlargement: true })
+      .toBuffer();
+
+    if (dto.watermark) {
+      imgBuf = await this.applyWatermark(imgBuf);
+    }
+
+    const jpgBuf: Buffer = await (sharp as any)(imgBuf)
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toBuffer();
+
+    const meta = await (sharp as any)(jpgBuf).metadata();
+    const key = `${dto.userId}/${baseName}.jpg`;
+    await this.s3Service.upload(key, jpgBuf, 'image/jpeg');
+
+    const record = await this.mediaRepo.create({
+      userId: dto.userId,
+      folder: dto.userId,
+      key,
+      slug: baseName,
+      publicUrl: this.buildPublicUrl(key),
+      title: appliedTitle,
+      originalName: file.originalname,
+      mimeType: 'image/jpeg',
+      fileSize: jpgBuf.length,
+      width: meta.width || null,
+      height: meta.height || null,
+      tags: dto.tags || [],
+    });
+
+    return record;
+  }
+
+  async getPublicLibrary(
+    page: number,
+    limit: number,
+    type?: string,
+    userId?: string,
+  ) {
+    const filter: any = {};
+    if (userId) filter.userId = userId;
+    if (type === 'image') filter.mimeType = /^image\//i;
+    else if (type === 'video') filter.mimeType = /^video\//i;
+    else if (type === 'file') filter.mimeType = { $not: /^image\/|^video\//i };
+    return this.mediaRepo.findPaginated(filter, page, limit);
   }
 
   async getLibrary(

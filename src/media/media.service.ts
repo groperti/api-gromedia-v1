@@ -592,47 +592,108 @@ export class MediaService implements OnModuleInit {
     return results;
   }
 
-  async convert(dto: ConvertMediaDto): Promise<MediaFileDocument> {
-    const record = await this.mediaRepo.findById(dto.id);
-    if (!record) throw new NotFoundException('Media not found');
+  /**
+   * Resolve the source S3 key from any of: existing media record id, raw S3 key,
+   * or a public URL hosted on this CDN.
+   */
+  private extractKeyFromUrl(url: string): string | null {
+    try {
+      const u = new URL(url);
+      const cdn = new URL(this.cdnBaseUrl);
+      // Same host as the configured CDN bucket
+      if (u.host === cdn.host) {
+        return u.pathname.replace(/^\/+/, '');
+      }
+      // Custom CDN domain (e.g. img.groperti.com) — accept any path that
+      // starts with a userId-like segment. This matches the upload key shape
+      // `<userId>/<filename>.<ext>` written by `upload()`.
+      if (u.pathname && u.pathname.length > 1) {
+        return u.pathname.replace(/^\/+/, '');
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
 
+  async convert(
+    dto: ConvertMediaDto,
+  ): Promise<MediaFileDocument | { key: string; publicUrl: string; jpgUrl?: string; webpUrl?: string; pngUrl?: string }> {
     const ext = dto.format;
     const urlField = ext === 'jpg' ? 'jpgUrl' : ext === 'webp' ? 'webpUrl' : 'pngUrl';
 
-    if (record[urlField]) {
+    // 1. Resolve the source key (from id → record, or directly from key/url)
+    let record: MediaFileDocument | null = null;
+    let sourceKey: string | null = null;
+
+    if (dto.id) {
+      record = await this.mediaRepo.findById(dto.id);
+      if (!record) throw new NotFoundException('Media not found');
+      sourceKey = record.key;
+    } else if (dto.key) {
+      sourceKey = dto.key;
+      record = await this.mediaRepo.findOne({ key: sourceKey });
+    } else if (dto.url) {
+      sourceKey = this.extractKeyFromUrl(dto.url);
+      if (!sourceKey) throw new BadRequestException('Could not extract S3 key from url');
+      record = await this.mediaRepo.findOne({ key: sourceKey });
+    } else {
+      throw new BadRequestException('One of id, key, or url is required');
+    }
+
+    if (!sourceKey) throw new NotFoundException('Source media key could not be resolved');
+
+    const targetKey = sourceKey.replace(/\.[^.]+$/, `.${ext}`);
+    const targetPublicUrl = this.buildPublicUrl(targetKey);
+
+    // 2. Fast-path on the DB: existing record already has the converted URL.
+    if (record && record[urlField]) {
       return record;
     }
 
-    const avifBuf = await this.s3Service.download(record.key);
+    // 3. Fast-path on S3: target file already exists (e.g. converted previously
+    //    by a stateless caller). Reuse it without re-encoding.
+    if (await this.s3Service.exists(targetKey)) {
+      if (record) {
+        return this.mediaRepo.updateById(record.id, { [urlField]: targetPublicUrl });
+      }
+      return { key: targetKey, publicUrl: targetPublicUrl, [urlField]: targetPublicUrl };
+    }
+
+    // 4. Slow path: download original, convert via sharp, upload target.
+    if (!(await this.s3Service.exists(sourceKey))) {
+      throw new NotFoundException(`Source object missing on S3: ${sourceKey}`);
+    }
+    const sourceBuf = await this.s3Service.download(sourceKey);
 
     let convertedBuf: Buffer;
     let contentType: string;
 
     if (ext === 'jpg') {
-      convertedBuf = await (sharp as any)(avifBuf)
+      convertedBuf = await (sharp as any)(sourceBuf, { failOnError: false })
         .jpeg({ quality: 82, mozjpeg: true })
         .toBuffer();
       contentType = 'image/jpeg';
     } else if (ext === 'webp') {
-      convertedBuf = await (sharp as any)(avifBuf)
+      convertedBuf = await (sharp as any)(sourceBuf, { failOnError: false })
         .webp({ quality: 80 })
         .toBuffer();
       contentType = 'image/webp';
     } else {
-      convertedBuf = await (sharp as any)(avifBuf)
+      convertedBuf = await (sharp as any)(sourceBuf, { failOnError: false })
         .png({ compressionLevel: 8 })
         .toBuffer();
       contentType = 'image/png';
     }
 
-    const convertedKey = record.key.replace(/\.[^.]+$/, `.${ext}`);
-    await this.s3Service.upload(convertedKey, convertedBuf, contentType);
+    await this.s3Service.upload(targetKey, convertedBuf, contentType);
 
-    const convertedUrl = this.buildPublicUrl(convertedKey);
-    const updated = await this.mediaRepo.updateById(record.id, {
-      [urlField]: convertedUrl,
-    });
+    if (record) {
+      return this.mediaRepo.updateById(record.id, { [urlField]: targetPublicUrl });
+    }
 
-    return updated;
+    // No DB record (e.g. legacy uploads or external callers). Return a minimal
+    // shape that mirrors the record-bearing branch for the consumer.
+    return { key: targetKey, publicUrl: targetPublicUrl, [urlField]: targetPublicUrl };
   }
 }

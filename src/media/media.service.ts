@@ -20,10 +20,15 @@ import { UploadMediaDto } from './dto/upload-media.dto';
 import { UpdateMediaDto } from './dto/update-media.dto';
 import { ConvertMediaDto } from './dto/convert-media.dto';
 import { MediaFileDocument } from './schemas/media-file.schema';
+import { MediaProcessingGate } from './services/media-processing-gate.service';
 
 if (ffmpegStatic) {
   (ffmpeg as any).setFfmpegPath(ffmpegStatic as unknown as string);
 }
+
+// Cap each sharp op at 1 vips thread so concurrent uploads spread across
+// the (enlarged) libuv pool instead of fighting for the same N CPUs.
+(sharp as any).concurrency(1);
 
 const IMAGE_EXTS = /\.(jpg|jpeg|png|webp|gif|bmp|tiff|avif|heic)$/i;
 const VIDEO_EXTS = /\.(mp4|mov|m4v|avi|mkv|webm|mpeg|mpg|3gp|3gpp|ts|m2ts)$/i;
@@ -112,6 +117,7 @@ export class MediaService implements OnModuleInit {
     private readonly configService: ConfigService,
     private readonly s3Service: S3Service,
     private readonly mediaRepo: MediaRepository,
+    private readonly gate: MediaProcessingGate,
   ) {}
 
   onModuleInit() {
@@ -274,7 +280,24 @@ export class MediaService implements OnModuleInit {
     });
   }
 
+  /** Layer 2: Wrap any encode-bound work with admission control. */
+  private async runGated<T>(fn: () => Promise<T>): Promise<T> {
+    await this.gate.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.gate.release();
+    }
+  }
+
   async upload(
+    file: Express.Multer.File,
+    dto: UploadMediaDto,
+  ): Promise<MediaFileDocument> {
+    return this.runGated(() => this.doUpload(file, dto));
+  }
+
+  private async doUpload(
     file: Express.Multer.File,
     dto: UploadMediaDto,
   ): Promise<MediaFileDocument> {
@@ -294,15 +317,21 @@ export class MediaService implements OnModuleInit {
         throw new BadRequestException('Image max size is 20MB');
       }
 
-      let imgBuf: Buffer = file.buffer;
-
+      let imgBuf: Buffer;
       try {
-        await (sharp as any)(imgBuf).metadata();
+        imgBuf = await (sharp as any)(file.path)
+          .resize({ width: this.maxWidth, withoutEnlargement: true })
+          .toBuffer();
       } catch {
-        imgBuf = await (sharp as any)(imgBuf, { failOnError: false }).png().toBuffer();
+        // sharp couldn't decode (corrupt/unknown header) — fall back to forced
+        // PNG decode via buffer. This still keeps memory below the input size
+        // because of the resize cap.
+        const raw = await fs.readFile(file.path);
+        imgBuf = await (sharp as any)(raw, { failOnError: false })
+          .png()
+          .resize({ width: this.maxWidth, withoutEnlargement: true })
+          .toBuffer();
       }
-
-      imgBuf = await (sharp as any)(imgBuf).resize({ width: this.maxWidth, withoutEnlargement: true }).toBuffer();
 
       if (dto.watermark) {
         imgBuf = await this.applyWatermark(imgBuf);
@@ -344,19 +373,16 @@ export class MediaService implements OnModuleInit {
         throw new BadRequestException('Video max size is 100MB');
       }
 
-      const tmpIn = path.join(os.tmpdir(), `${uuidv4()}_in`);
       const tmpOut = path.join(os.tmpdir(), `${uuidv4()}_out.mp4`);
-      await fs.writeFile(tmpIn, file.buffer);
 
       let uploadedBody: Buffer;
       try {
-        await this.transcodeVideoToMp4(tmpIn, tmpOut);
+        await this.transcodeVideoToMp4(file.path, tmpOut);
         uploadedBody = await fs.readFile(tmpOut);
       } catch (e) {
-        this.logger.error('ffmpeg transcode failed, using original buffer', e);
-        uploadedBody = file.buffer;
+        this.logger.error('ffmpeg transcode failed, using original file', e);
+        uploadedBody = await fs.readFile(file.path);
       } finally {
-        try { await fs.unlink(tmpIn); } catch { }
         try { await fs.unlink(tmpOut); } catch { }
       }
 
@@ -393,7 +419,8 @@ export class MediaService implements OnModuleInit {
       const key = `${dto.userId}/${baseName}${typeInfo.ext}`;
       const contentType = typeInfo.contentType || mime || 'application/octet-stream';
 
-      await this.s3Service.upload(key, file.buffer, contentType);
+      const docBuf = await fs.readFile(file.path);
+      await this.s3Service.upload(key, docBuf, contentType);
 
       const record = await this.mediaRepo.create({
         userId: dto.userId,
@@ -419,6 +446,13 @@ export class MediaService implements OnModuleInit {
     file: Express.Multer.File,
     dto: UploadMediaDto,
   ): Promise<MediaFileDocument> {
+    return this.runGated(() => this.doUploadJpg(file, dto));
+  }
+
+  private async doUploadJpg(
+    file: Express.Multer.File,
+    dto: UploadMediaDto,
+  ): Promise<MediaFileDocument> {
     const mime = file.mimetype || '';
     const originalName = (file.originalname || '').toLowerCase();
 
@@ -436,17 +470,18 @@ export class MediaService implements OnModuleInit {
       : uuidv4();
     const appliedTitle = derivedTitle || undefined;
 
-    let imgBuf: Buffer = file.buffer;
-
+    let imgBuf: Buffer;
     try {
-      await (sharp as any)(imgBuf).metadata();
+      imgBuf = await (sharp as any)(file.path)
+        .resize({ width: this.maxWidth, withoutEnlargement: true })
+        .toBuffer();
     } catch {
-      imgBuf = await (sharp as any)(imgBuf, { failOnError: false }).png().toBuffer();
+      const raw = await fs.readFile(file.path);
+      imgBuf = await (sharp as any)(raw, { failOnError: false })
+        .png()
+        .resize({ width: this.maxWidth, withoutEnlargement: true })
+        .toBuffer();
     }
-
-    imgBuf = await (sharp as any)(imgBuf)
-      .resize({ width: this.maxWidth, withoutEnlargement: true })
-      .toBuffer();
 
     if (dto.watermark) {
       imgBuf = await this.applyWatermark(imgBuf);
@@ -617,6 +652,12 @@ export class MediaService implements OnModuleInit {
   }
 
   async convert(
+    dto: ConvertMediaDto,
+  ): Promise<MediaFileDocument | { key: string; publicUrl: string; jpgUrl?: string; webpUrl?: string; pngUrl?: string }> {
+    return this.runGated(() => this.doConvert(dto));
+  }
+
+  private async doConvert(
     dto: ConvertMediaDto,
   ): Promise<MediaFileDocument | { key: string; publicUrl: string; jpgUrl?: string; webpUrl?: string; pngUrl?: string }> {
     const ext = dto.format;

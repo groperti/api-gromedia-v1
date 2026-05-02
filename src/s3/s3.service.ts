@@ -7,6 +7,8 @@ import {
   DeleteObjectCommand,
   HeadObjectCommand,
 } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { Agent as HttpsAgent } from 'https';
 
 @Injectable()
 export class S3Service implements OnModuleInit {
@@ -19,6 +21,15 @@ export class S3Service implements OnModuleInit {
     const s3Config = this.configService.get('s3');
     this.bucket = s3Config.bucket;
 
+    // Reuse TLS connections to Contabo across uploads. Without keepAlive each
+    // PutObject pays a fresh TLS handshake (~30-50ms) which dominates latency
+    // for small images at high concurrency.
+    const httpsAgent = new HttpsAgent({
+      keepAlive: true,
+      keepAliveMsecs: 30_000,
+      maxSockets: 50,
+    });
+
     this.client = new S3Client({
       credentials: {
         accessKeyId: s3Config.accessKey,
@@ -27,6 +38,12 @@ export class S3Service implements OnModuleInit {
       region: s3Config.region,
       endpoint: `https://${s3Config.endpoint}`,
       forcePathStyle: true,
+      maxAttempts: 3,
+      requestHandler: new NodeHttpHandler({
+        httpsAgent,
+        connectionTimeout: 10_000,
+        socketTimeout: 60_000,
+      }),
     });
   }
 

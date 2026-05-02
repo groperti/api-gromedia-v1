@@ -1,0 +1,40 @@
+# Build output and deps — rebuilt inside the image
+node_modules
+dist
+npm-debug.log*
+
+# Local environment files — secrets must come from runtime env, not the image
+.env
+.env.*
+!.env.example
+
+# VCS / IDE / OS noise
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docs and docker-internal files
+README.md
+docs/
+SYSTEM_MAP.md
+CLAUDE.md
+.dockerignore
+Dockerfile
+docker-compose.yml
+docker-compose*.yml
+
+# Tests / coverage / CI artifacts
+test/
+__tests__/
+*.test.ts
+*.spec.ts
+coverage/
+.nyc_output
+
+# Misc
+*.log
+tmp/

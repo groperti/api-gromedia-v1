@@ -9,11 +9,17 @@ import {
   Query,
   Req,
   UploadedFile,
+  UseFilters,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs/promises';
+import { v4 as uuidv4 } from 'uuid';
 import { ApiKeyGuard } from '../common/guards/api-key.guard';
 import { JwtUserGuard } from '../common/guards/jwt-user.guard';
 import { PublicApiKeyGuard } from '../common/guards/public-api-key.guard';
@@ -21,8 +27,29 @@ import { MediaService } from './media.service';
 import { UploadMediaDto } from './dto/upload-media.dto';
 import { UpdateMediaDto } from './dto/update-media.dto';
 import { ConvertMediaDto } from './dto/convert-media.dto';
+import { MediaSaturatedFilter } from './filters/media-saturated.filter';
+
+// Disk-backed multer config: keeps multi-MB request bodies off the JS heap so
+// concurrent uploads can't OOM the container. Tmp file is unlinked in finally.
+const uploadStorage = diskStorage({
+  destination: os.tmpdir(),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').slice(0, 16);
+    cb(null, `gromedia-${uuidv4()}${ext}`);
+  },
+});
+
+async function safeUnlink(p?: string) {
+  if (!p) return;
+  try {
+    await fs.unlink(p);
+  } catch {
+    /* tmp may already be gone */
+  }
+}
 
 @Controller('media')
+@UseFilters(MediaSaturatedFilter)
 export class MediaController {
   constructor(private readonly mediaService: MediaService) {}
 
@@ -30,25 +57,31 @@ export class MediaController {
   @UseGuards(ApiKeyGuard)
   @UseInterceptors(
     FileInterceptor('file', {
-      limits: { fileSize: 150 * 1024 * 1024 },
+      storage: uploadStorage,
+      limits: { fileSize: 100 * 1024 * 1024 },
     }),
   )
   async upload(
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: UploadMediaDto,
   ) {
-    const record = await this.mediaService.upload(file, dto);
-    return {
-      error: null,
-      message: 'Uploaded successfully',
-      data: record,
-    };
+    try {
+      const record = await this.mediaService.upload(file, dto);
+      return {
+        error: null,
+        message: 'Uploaded successfully',
+        data: record,
+      };
+    } finally {
+      await safeUnlink(file?.path);
+    }
   }
 
   @Post('upload-jpg')
   @UseGuards(ApiKeyGuard)
   @UseInterceptors(
     FileInterceptor('file', {
+      storage: uploadStorage,
       limits: { fileSize: 20 * 1024 * 1024 },
     }),
   )
@@ -56,12 +89,16 @@ export class MediaController {
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: UploadMediaDto,
   ) {
-    const record = await this.mediaService.uploadJpg(file, dto);
-    return {
-      error: null,
-      message: 'Uploaded successfully',
-      data: record,
-    };
+    try {
+      const record = await this.mediaService.uploadJpg(file, dto);
+      return {
+        error: null,
+        message: 'Uploaded successfully',
+        data: record,
+      };
+    } finally {
+      await safeUnlink(file?.path);
+    }
   }
 
   @Get('library/public')

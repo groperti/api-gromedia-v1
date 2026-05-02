@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import configuration from './config/configuration';
 import { MediaModule } from './media/media.module';
+import { HealthModule } from './health/health.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { MediaModule } from './media/media.module';
       inject: [ConfigService],
     }),
     MediaModule,
+    HealthModule,
   ],
   controllers: [],
   providers: [],

@@ -1,4 +1,18 @@
 node_modules
 dist
-.env
 *.log
+
+# Environment files — only the .example template is committed.
+.env
+.env.*
+!.env.example
+
+# OS / IDE noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Coverage / test artifacts
+coverage/
+.nyc_output/

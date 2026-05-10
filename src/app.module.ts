@@ -4,6 +4,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import configuration from './config/configuration';
 import { MediaModule } from './media/media.module';
 import { HealthModule } from './health/health.module';
+import { TelegramModule } from './common/telegram/telegram.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { HealthModule } from './health/health.module';
       }),
       inject: [ConfigService],
     }),
+    TelegramModule,
     MediaModule,
     HealthModule,
   ],

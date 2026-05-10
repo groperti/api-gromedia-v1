@@ -24,6 +24,9 @@ services:
       MEDIA_MAX_INFLIGHT: "16"
       MEDIA_MAX_QUEUED: "32"
       MEDIA_RETRY_AFTER_SEC: "5"
+      # Telegram alerts (UploadErrorAlertFilter). Bot token + chat id come
+      # from .env so they aren't committed; this just enables the wiring.
+      TELEGRAM_ALERTS_ENABLED: "1"
 
     # Resource caps — predictable OOM behaviour and CPU bound for capacity
     # planning. Tune in pair with MEDIA_MAX_INFLIGHT and UV_THREADPOOL_SIZE.

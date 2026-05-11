@@ -28,6 +28,13 @@ async function bootstrap() {
   });
 
   app.enableCors({
+    // Regex covers https://groperti.com plus every subdomain and `www.`
+    // variant (e.g. https://www.agen.groperti.com). The previous string-only
+    // allowlist silently rejected the `www.` host: NestJS's CORS middleware
+    // returned 204 with no Access-Control-Allow-Origin header, which the
+    // browser surfaces to axios as ERR_NETWORK — the exact failure mode in
+    // the production upload alerts (e.g. 2026-05-11 anisamuhaimin07@gmail.com
+    // hitting POST from https://www.agen.groperti.com).
     origin: [
       'http://localhost:3000',
       'http://localhost:3001',
@@ -37,11 +44,7 @@ async function bootstrap() {
       'http://localhost:9010',
       'http://localhost:9030',
       'http://localhost:9040',
-      'https://groperti.com',
-      'https://agen.groperti.com',
-      'https://partner.groperti.com',
-      'https://affiliate.groperti.com',
-      'https://admin.groperti.com',
+      /^https:\/\/([a-z0-9-]+\.)*groperti\.com$/,
     ],
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [

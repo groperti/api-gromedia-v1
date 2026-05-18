@@ -4,13 +4,18 @@
 # Builder — installs all deps, compiles TS to dist/, then prunes dev deps so
 # the runtime stage can copy node_modules directly without a second install.
 # ---------------------------------------------------------------------------
-FROM node:20.18-alpine AS builder
+# Debian (glibc) base picks up @img/sharp-libvips-linux-x64, which ships HEIF
+# decoders. The Alpine (musl) prebuild strips HEIC for size/HEVC reasons, and
+# iPhone uploads (the majority of our buyer/agent traffic) are HEIC by default.
+FROM node:20.18-bookworm-slim AS builder
 
 # python3/make/g++ are kept as fallback for any addon that falls through to
-# node-gyp; sharp 0.33+ uses prebuilds in @img/sharp-libvips-linuxmusl-* and
+# node-gyp; sharp 0.33+ uses prebuilds in @img/sharp-libvips-linux-x64 and
 # normally won't compile from source. ffmpeg is needed by ffmpeg-static linkage
 # checks during install.
-RUN apk add --no-cache python3 make g++ ffmpeg
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ ffmpeg ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -33,11 +38,13 @@ RUN --mount=type=cache,target=/root/.npm \
 # ---------------------------------------------------------------------------
 # Runtime — minimal image with only what's needed to run the compiled app.
 # ---------------------------------------------------------------------------
-FROM node:20.18-alpine AS runner
+FROM node:20.18-bookworm-slim AS runner
 
 # ffmpeg for video transcoding; tini gives us a real PID 1 so SIGTERM forwards
 # to node and uploads can drain cleanly; wget powers the HEALTHCHECK below.
-RUN apk add --no-cache ffmpeg tini wget
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg tini wget ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     PORT=4881 \
@@ -60,5 +67,5 @@ EXPOSE 4881
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://127.0.0.1:4881/health || exit 1
 
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/main"]

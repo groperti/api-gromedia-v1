@@ -71,6 +71,10 @@ export class UploadErrorAlertFilter implements ExceptionFilter {
         /^\/media\/(upload|upload-jpg|convert)\b/.test(url);
       if (!isUploadRoute) return;
 
+      // Skip client errors (bad input, unsupported format, auth, payload too
+      // large). They are user-fixable and don't indicate server pain.
+      if (status >= 400 && status < 500) return;
+
       // Pull useful context from the request without touching the file body.
       const reqId = req.requestId || (req.headers['x-request-id'] as string) || '-';
       const ip =

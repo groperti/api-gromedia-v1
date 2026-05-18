@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleInit,
+  UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as sharp from 'sharp';
@@ -30,7 +31,17 @@ if (ffmpegStatic) {
 // the (enlarged) libuv pool instead of fighting for the same N CPUs.
 (sharp as any).concurrency(1);
 
-const IMAGE_EXTS = /\.(jpg|jpeg|png|webp|gif|bmp|tiff|avif|heic)$/i;
+const IMAGE_EXTS = /\.(jpg|jpeg|png|webp|gif|bmp|tiff|avif|heic|heif)$/i;
+
+// Translate sharp/libvips decode failures into a 415 instead of a 500. HEIC
+// works on the Debian (glibc) runtime; this catches truly corrupt files or
+// formats that even the fallback path can't read.
+function isDecoderUnsupportedError(err: unknown): boolean {
+  const msg = (err as any)?.message ? String((err as any).message) : '';
+  return /No decoding plugin installed|unsupported image format|bad seek|VipsForeignLoad: buffer is not in a known format|Input file contains unsupported image format/i.test(
+    msg,
+  );
+}
 const VIDEO_EXTS = /\.(mp4|mov|m4v|avi|mkv|webm|mpeg|mpg|3gp|3gpp|ts|m2ts)$/i;
 const isImage = (mime: string, name: string) =>
   (mime && mime.startsWith('image/')) || IMAGE_EXTS.test(name || '');
@@ -320,17 +331,31 @@ export class MediaService implements OnModuleInit {
       let imgBuf: Buffer;
       try {
         imgBuf = await (sharp as any)(file.path)
+          // .rotate() with no arg applies EXIF orientation and strips it.
+          // iPhone HEIC/JPEG always stores portrait shots as landscape +
+          // orientation=6; without this the output saves sideways.
+          .rotate()
           .resize({ width: this.maxWidth, withoutEnlargement: true })
           .toBuffer();
-      } catch {
+      } catch (firstErr) {
         // sharp couldn't decode (corrupt/unknown header) — fall back to forced
         // PNG decode via buffer. This still keeps memory below the input size
         // because of the resize cap.
-        const raw = await fs.readFile(file.path);
-        imgBuf = await (sharp as any)(raw, { failOnError: false })
-          .png()
-          .resize({ width: this.maxWidth, withoutEnlargement: true })
-          .toBuffer();
+        try {
+          const raw = await fs.readFile(file.path);
+          imgBuf = await (sharp as any)(raw, { failOnError: false })
+            .rotate()
+            .png()
+            .resize({ width: this.maxWidth, withoutEnlargement: true })
+            .toBuffer();
+        } catch (secondErr) {
+          if (isDecoderUnsupportedError(firstErr) || isDecoderUnsupportedError(secondErr)) {
+            throw new UnsupportedMediaTypeException(
+              'Format gambar tidak didukung atau file rusak. Coba JPEG/PNG/WEBP.',
+            );
+          }
+          throw secondErr;
+        }
       }
 
       if (dto.watermark) {
@@ -473,14 +498,25 @@ export class MediaService implements OnModuleInit {
     let imgBuf: Buffer;
     try {
       imgBuf = await (sharp as any)(file.path)
+        .rotate()
         .resize({ width: this.maxWidth, withoutEnlargement: true })
         .toBuffer();
-    } catch {
-      const raw = await fs.readFile(file.path);
-      imgBuf = await (sharp as any)(raw, { failOnError: false })
-        .png()
-        .resize({ width: this.maxWidth, withoutEnlargement: true })
-        .toBuffer();
+    } catch (firstErr) {
+      try {
+        const raw = await fs.readFile(file.path);
+        imgBuf = await (sharp as any)(raw, { failOnError: false })
+          .rotate()
+          .png()
+          .resize({ width: this.maxWidth, withoutEnlargement: true })
+          .toBuffer();
+      } catch (secondErr) {
+        if (isDecoderUnsupportedError(firstErr) || isDecoderUnsupportedError(secondErr)) {
+          throw new UnsupportedMediaTypeException(
+            'Format gambar tidak didukung atau file rusak. Coba JPEG/PNG/WEBP.',
+          );
+        }
+        throw secondErr;
+      }
     }
 
     if (dto.watermark) {
